@@ -34,7 +34,13 @@ try:
 except Exception as e:
     st.error(f"Failed to connect to AWS: {e}")
 
-with st.container():
+
+# ==========================================
+# UI FIX: Center the form using columns
+# ==========================================
+col1, col2, col3 = st.columns([1, 2, 1]) # The middle column is twice as wide as the sides
+
+with col2:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Job Role Configuration")
     
@@ -50,15 +56,18 @@ with st.container():
 
     with st.form("resume_upload_form", clear_on_submit=True):
         st.markdown("**Edit the Job Description if needed:**")
-        edited_jd = st.text_area("Job Description", value=fetched_jd, height=200, label_visibility="collapsed")
+        # Reduced height to 150 to save space
+        edited_jd = st.text_area("Job Description", value=fetched_jd, height=150, label_visibility="collapsed")
         
         st.markdown("---")
         uploaded_files = st.file_uploader("Choose up to 10 resume files", type=["pdf", "txt"], accept_multiple_files=True)
-        submitted = st.form_submit_button("Match Resumes")
+        # Added use_container_width=True to make the button look clean
+        submitted = st.form_submit_button("Match Resumes", use_container_width=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-# --- Processing Logic ---
+
+# --- Processing Logic (Runs outside the columns to use the full wide layout for results) ---
 if submitted:
     if not role:
         st.error("Please select a Job Role first.")
