@@ -139,23 +139,19 @@ if submitted:
                             evaluation_data = res.get("evaluation", {})
                             
                             # ==========================================
-                            # JSON SKILL EXTRACTION (Updated for key_matches/key_gaps)
+                            # JSON SKILL EXTRACTION
                             # ==========================================
-                            # Now checks for "key_matches", then "matches", then "matched_skills"
                             raw_matched = evaluation_data.get("key_matches", evaluation_data.get("matches", evaluation_data.get("matched_skills", [])))
                             raw_missing = evaluation_data.get("key_gaps", evaluation_data.get("gaps", evaluation_data.get("missing_skills", [])))
                             
-                            # Handle cases where the AI returns a list vs a comma-separated string
                             matched_skills = ", ".join(raw_matched) if isinstance(raw_matched, list) else str(raw_matched)
                             missing_skills = ", ".join(raw_missing) if isinstance(raw_missing, list) else str(raw_missing)
                             
-                            # Clean up empty values
                             if not matched_skills or matched_skills.strip() in ["", "[]", "None"]: 
                                 matched_skills = "None identified"
                             if not missing_skills or missing_skills.strip() in ["", "[]", "None"]: 
                                 missing_skills = "None identified"
 
-                            # Colored Header
                             bg_color = "#28a745" if status == "SELECTED" else "#dc3545"
                             
                             st.markdown(f"""
@@ -172,11 +168,6 @@ if submitted:
 | **{ext_name}** | {ext_mobile} | {ext_email} | {matched_skills} | {missing_skills} |
                                 """
                                 st.markdown(table_markdown)
-                                
-                                # Keep the raw JSON available for debugging
-                                st.markdown("---")
-                                st.markdown("**Raw AI Decision JSON:**")
-                                st.json(evaluation_data)
 
                     else:
                         st.error(f"API Error for {file.name}: {resp.status_code}")
