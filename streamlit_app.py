@@ -139,10 +139,11 @@ if submitted:
                             evaluation_data = res.get("evaluation", {})
                             
                             # ==========================================
-                            # JSON SKILL EXTRACTION (Robust Parsing)
+                            # JSON SKILL EXTRACTION (Bulletproof Parsing)
                             # ==========================================
-                            raw_matched = evaluation_data.get("matched_skills", [])
-                            raw_missing = evaluation_data.get("missing_skills", [])
+                            # Fallback logic: Checks for "matches" first, then "matched_skills"
+                            raw_matched = evaluation_data.get("matches", evaluation_data.get("matched_skills", []))
+                            raw_missing = evaluation_data.get("gaps", evaluation_data.get("missing_skills", []))
                             
                             # Handle cases where the AI returns a list vs a comma-separated string
                             matched_skills = ", ".join(raw_matched) if isinstance(raw_matched, list) else str(raw_matched)
@@ -172,7 +173,7 @@ if submitted:
                                 """
                                 st.markdown(table_markdown)
                                 
-                                # Keep the raw JSON available for debugging just in case
+                                # Keep the raw JSON available for debugging
                                 st.markdown("---")
                                 st.markdown("**Raw AI Decision JSON:**")
                                 st.json(evaluation_data)
