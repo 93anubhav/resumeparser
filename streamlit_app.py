@@ -6,7 +6,7 @@ import json
 import re
 import boto3
 
-st.set_page_config(page_title="AI Resume Matcher", layout="centered")
+st.set_page_config(page_title="AI Resume Matcher", layout="wide")
 
 st.markdown(
     """
@@ -38,7 +38,6 @@ with st.container():
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Job Role Configuration")
     
-    # Put the selectbox outside the form so it triggers the database fetch immediately
     role = st.selectbox("Select Job Role:", ["", "Python", "Nodejs", "Java"], format_func=lambda x: ("-- Select Job Role --" if x=="" else x))
     
     fetched_jd = ""
@@ -49,10 +48,8 @@ with st.container():
         except Exception as e:
             st.warning(f"Could not fetch JD from database: {e}")
 
-    # --- Upload Form ---
     with st.form("resume_upload_form", clear_on_submit=True):
         st.markdown("**Edit the Job Description if needed:**")
-        # Pre-fill the text area with the JD from DynamoDB
         edited_jd = st.text_area("Job Description", value=fetched_jd, height=200, label_visibility="collapsed")
         
         st.markdown("---")
@@ -115,11 +112,9 @@ if submitted:
                             ext_name = line
                             break
 
-                    # ==========================================
-                    # Send payload WITH the edited Job Description
                     payload = {
                         "job_role": role,
-                        "job_description": edited_jd, # Passes the custom JD to Lambda
+                        "job_description": edited_jd, 
                         "resumes": [{
                             "filename": file.name,
                             "content": resume_text[:4000],
@@ -141,8 +136,25 @@ if submitted:
                         for res in results_list:
                             status = res.get("status", "ERROR")
                             filename = res.get("filename", "Unknown")
+                            evaluation_data = res.get("evaluation", {})
                             
-                            # Determine header color based on AI decision
+                            # ==========================================
+                            # JSON SKILL EXTRACTION (Robust Parsing)
+                            # ==========================================
+                            raw_matched = evaluation_data.get("matched_skills", [])
+                            raw_missing = evaluation_data.get("missing_skills", [])
+                            
+                            # Handle cases where the AI returns a list vs a comma-separated string
+                            matched_skills = ", ".join(raw_matched) if isinstance(raw_matched, list) else str(raw_matched)
+                            missing_skills = ", ".join(raw_missing) if isinstance(raw_missing, list) else str(raw_missing)
+                            
+                            # Clean up empty values
+                            if not matched_skills or matched_skills.strip() in ["", "[]", "None"]: 
+                                matched_skills = "None identified"
+                            if not missing_skills or missing_skills.strip() in ["", "[]", "None"]: 
+                                missing_skills = "None identified"
+
+                            # Colored Header
                             bg_color = "#28a745" if status == "SELECTED" else "#dc3545"
                             
                             st.markdown(f"""
@@ -151,13 +163,19 @@ if submitted:
                             </div>
                             """, unsafe_allow_html=True)
                             
-                            # --- NATIVE MARKDOWN TABLE (No Pandas needed!) ---
-                            table_markdown = f"""
-| Candidate Name | Email Address | Mobile Number | AI Decision |
-| :--- | :--- | :--- | :--- |
-| **{ext_name}** | {ext_email} | {ext_mobile} | {status} |
-                            """
-                            st.markdown(table_markdown)
+                            # --- NATIVE MARKDOWN TABLE ---
+                            with st.expander("View Full Candidate Breakdown", expanded=False):
+                                table_markdown = f"""
+| Candidate Name | Mobile | Email | Matched Skills ✅ | Missing Skills ❌ |
+| :--- | :--- | :--- | :--- | :--- |
+| **{ext_name}** | {ext_mobile} | {ext_email} | {matched_skills} | {missing_skills} |
+                                """
+                                st.markdown(table_markdown)
+                                
+                                # Keep the raw JSON available for debugging just in case
+                                st.markdown("---")
+                                st.markdown("**Raw AI Decision JSON:**")
+                                st.json(evaluation_data)
 
                     else:
                         st.error(f"API Error for {file.name}: {resp.status_code}")
