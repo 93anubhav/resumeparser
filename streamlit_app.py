@@ -2,189 +2,303 @@ import io
 import requests
 import streamlit as st
 import pdfplumber
-import json
+import docx  
 import re
 import boto3
+import uuid
+import concurrent.futures 
+from datetime import datetime, timedelta
+from botocore.client import Config 
+from boto3.dynamodb.conditions import Attr
 
-st.set_page_config(page_title="AI Resume Matcher", layout="wide")
+# ================= CONFIG =================
+st.set_page_config(page_title="AI Resume Matcher", page_icon="⚡", layout="wide")
 
-st.markdown(
-    """
-    <style>
-    .page-title { text-align: center; font-size:32px; color:#2a4d8f; font-weight:700; margin-bottom:18px }
-    .card {background: white; padding: 26px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); margin-bottom: 26px}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ================= UI / CSS =================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
-st.markdown('<div class="page-title">Bulk AI Resume Matcher</div>', unsafe_allow_html=True)
+html, body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f6f8fb;
+}
 
-api_url = st.secrets.get("API_URL", "YOUR_API_GATEWAY_URL_HERE")
+/* Header */
+.header {
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:15px 20px;
+    border-radius:12px;
+    background: linear-gradient(90deg,#1e3a8a,#2563eb);
+    color:white;
+    margin-bottom:20px;
+}
 
-# --- Initialize DynamoDB for Frontend JD Fetching ---
-try:
-    dynamodb = boto3.resource(
-        'dynamodb',
+/* Selected Box Styling */
+.selected-box {
+    border-left:5px solid #16a34a;
+    background:#f0fdf4;
+    padding:15px;
+    border-radius:8px;
+    margin-bottom: 10px;
+}
+
+/* Rejected Box Styling */
+.rejected-box {
+    border-left:5px solid #dc2626;
+    background:#fef2f2;
+    padding:15px;
+    border-radius:8px;
+    margin-bottom: 10px;
+}
+
+.duplicate-warning {
+    background-color: #fffbeb;
+    border: 1px solid #f59e0b;
+    padding: 20px;
+    border-radius: 10px;
+    color: #92400e;
+    margin-bottom: 20px;
+}
+
+/* Buttons */
+.stButton>button {
+    background:#2563eb;
+    color:white;
+    border-radius:8px;
+    font-weight:600;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ================= AWS SETUP =================
+api_url = st.secrets.get("API_URL", "YOUR_API")
+S3_BUCKET = "resumeparser"
+
+@st.cache_resource
+def get_aws():
+    session = boto3.Session(
         region_name=st.secrets.get("AWS_REGION", "us-east-1"),
         aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"]
     )
-    jd_table = dynamodb.Table("JobRoleDescriptionMapping")
-except Exception as e:
-    st.error(f"Failed to connect to AWS: {e}")
+    db = session.resource('dynamodb')
+    # Use ap-south-1 for S3 as specified, forcing v4 signature for compatibility
+    s3 = session.client('s3', region_name="ap-south-1", config=Config(signature_version='s3v4'))
+    return db.Table("JobRoleDescriptionMapping"), db.Table("Resume_Metadata"), s3
 
+jd_table, metadata_table, s3_client = get_aws()
 
-# ==========================================
-# UI FIX: Center the form using columns
-# ==========================================
-col1, col2, col3 = st.columns([1, 2, 1]) # The middle column is twice as wide as the sides
+# ================= SESSION STATE =================
+if 'workflow' not in st.session_state: st.session_state.workflow = "INPUT"
+if 'results' not in st.session_state: st.session_state.results = []
+if 'to_process' not in st.session_state: st.session_state.to_process = []
+if 'duplicates' not in st.session_state: st.session_state.duplicates = []
+if 'expand_all' not in st.session_state: st.session_state.expand_all = False
+if 'history_data' not in st.session_state: st.session_state.history_data = []
 
-with col2:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("Job Role Configuration")
-    
-    role = st.selectbox("Select Job Role:", ["", "Python", "Nodejs", "Java"], format_func=lambda x: ("-- Select Job Role --" if x=="" else x))
-    
+# ================= LOGIC FUNCTIONS =================
+def clean_text(text):
+    """Normalizes whitespace and removes noise for the AI."""
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def extract_pii(file_bytes, file_name, file_type):
+    """Enhanced extraction for PDFs and DOCX."""
+    text = ""
+    try:
+        if file_name.lower().endswith(".pdf"):
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages[:3]:
+                    extracted = page.extract_text(layout=True) # layout=True is critical for multi-column resumes
+                    if extracted: text += extracted + "\n"
+        elif file_name.lower().endswith(".docx"):
+            doc = docx.Document(io.BytesIO(file_bytes))
+            text = "\n".join([p.text for p in doc.paragraphs])
+        
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        email = re.search(email_pattern, text)
+        
+        # Robust phone pattern for international/domestic formats
+        phone_pattern = r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4,5}'
+        phone = re.search(phone_pattern, text)
+
+        return {
+            "name": file_name,
+            "text": clean_text(text)[:4500],
+            "email": email.group(0) if email else "N/A",
+            "mobile": phone.group(0) if phone else "N/A",
+            "bytes": file_bytes,
+            "type": file_type
+        }
+    except Exception as e:
+        return {"name": file_name, "text": "", "email": "N/A", "mobile": "N/A", "error": str(e)}
+
+def call_ai(cand_data, role, jd):
+    """Worker for parallel API calls."""
+    payload = {
+        "job_role": role,
+        "job_description": jd,
+        "resumes": [{"filename": cand_data['name'], "content": cand_data['text'], "email": cand_data['email'], "mobile": cand_data['mobile']}]
+    }
+    try:
+        r = requests.post(api_url, json=payload, timeout=50)
+        res = r.json().get("body", r.json()).get("results", [])[0]
+        eval_data = res.get("evaluation", {})
+        return {
+            **cand_data,
+            "status": res.get("status"),
+            "reason": eval_data.get("reasoning", "No reason provided."),
+            "matched": eval_data.get("matched_skills", []),
+            "missing": eval_data.get("missing_skills", [])
+        }
+    except:
+        return {**cand_data, "status": "ERROR", "reason": "AI Connection Failed"}
+
+# ================= SIDEBAR =================
+with st.sidebar:
+    st.image("https://upload.wikimedia.org/wikipedia/commons/5/51/IBM_logo.svg", width=120)
+    st.markdown("### Evaluation Workspace")
+    mode = st.radio("Navigation", ["Evaluate Resumes", "History Audit"])
+
+    # Load Roles
+    scan = jd_table.scan(ProjectionExpression="JobRole")
+    roles = ["Select Role"] + sorted([i['JobRole'] for i in scan.get('Items', [])])
+    role = st.selectbox("Position", roles)
+
     fetched_jd = ""
-    if role:
-        try:
-            db_response = jd_table.get_item(Key={"JobRole": role.capitalize()})
-            fetched_jd = db_response.get("Item", {}).get("JobDescription", "No Job Description found in database for this role.")
-        except Exception as e:
-            st.warning(f"Could not fetch JD from database: {e}")
+    if role != "Select Role":
+        item = jd_table.get_item(Key={"JobRole": role}).get("Item", {})
+        fetched_jd = item.get("JobDescription", "")
 
-    with st.form("resume_upload_form", clear_on_submit=True):
-        st.markdown("**Edit the Job Description if needed:**")
-        # Reduced height to 150 to save space
-        edited_jd = st.text_area("Job Description", value=fetched_jd, height=150, label_visibility="collapsed")
+    jd_input = st.text_area("Job Description", value=fetched_jd, height=200)
+
+# ================= HEADER =================
+st.markdown(f"""
+<div class="header">
+    <h2 style="margin:0;">⚡ AI Resume Matcher</h2>
+    <span>{mode}</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ================= EVALUATION PAGE =================
+if mode == "Evaluate Resumes":
+
+    if st.session_state.workflow == "INPUT":
+        files = st.file_uploader("Upload Resumes", accept_multiple_files=True, type=["pdf", "docx"])
         
-        st.markdown("---")
-        uploaded_files = st.file_uploader("Choose up to 10 resume files", type=["pdf", "txt"], accept_multiple_files=True)
-        # Added use_container_width=True to make the button look clean
-        submitted = st.form_submit_button("Match Resumes", use_container_width=True)
+        if st.button("Start Analysis"):
+            if role == "Select Role" or not files:
+                st.warning("Please select a role and upload files.")
+            else:
+                with st.spinner("Extracting text & checking history..."):
+                    # Fast Parallel Extraction
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+                        candidates = list(ex.map(lambda f: extract_pii(f.getvalue(), f.name, f.type), files))
+                    
+                    # 6-Month Duplicate Check
+                    six_months_ago = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
+                    history = metadata_table.scan(FilterExpression=Attr('Date').gte(six_months_ago)).get('Items', [])
+                    
+                    st.session_state.to_process, st.session_state.duplicates = [], []
+                    
+                    for c in candidates:
+                        is_dup = next((h for h in history if (c['email'] != "N/A" and c['email'] == h.get('Email ID')) or (c['mobile'] != "N/A" and c['mobile'] == h.get('Mobile Number'))), None)
+                        if is_dup:
+                            c['prev_date'], c['prev_status'] = is_dup.get('Date'), is_dup.get('Status')
+                            st.session_state.duplicates.append(c)
+                        else:
+                            st.session_state.to_process.append(c)
+                    
+                    st.session_state.workflow = "DUPLICATE_CHECK" if st.session_state.duplicates else "PROCESSING"
+                st.rerun()
 
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# --- Processing Logic (Runs outside the columns to use the full wide layout for results) ---
-if submitted:
-    if not role:
-        st.error("Please select a Job Role first.")
-    elif not edited_jd.strip():
-        st.error("Job Description cannot be empty.")
-    elif not uploaded_files:
-        st.error("Please upload at least one resume.")
-    elif len(uploaded_files) > 10:
-        st.error("You can only process a maximum of 10 resumes at a time.")
-    else:
-        st.write(f"### Evaluating candidates for {role}...")
+    elif st.session_state.workflow == "DUPLICATE_CHECK":
+        st.markdown(f"""<div class="duplicate-warning"><h3>⚠️ {len(st.session_state.duplicates)} Duplicates Detected</h3>
+        Candidates found in the 6-month history.</div>""", unsafe_allow_html=True)
+        st.table([{"Name": d['name'], "Email": d['email'], "Last Applied": d['prev_date'], "Status": d['prev_status']} for d in st.session_state.duplicates])
         
-        progress_bar = st.progress(0)
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Skip Duplicates"): st.session_state.workflow = "PROCESSING"; st.rerun()
+        if c2.button("Process Everyone"): st.session_state.to_process += st.session_state.duplicates; st.session_state.workflow = "PROCESSING"; st.rerun()
+        if c3.button("Cancel"): st.session_state.workflow = "INPUT"; st.rerun()
+
+    elif st.session_state.workflow == "PROCESSING":
+        st.info(f"Processing {len(st.session_state.to_process)} resumes in parallel...")
+        bar = st.progress(0)
+        final_results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+            futures = [ex.submit(call_ai, c, role, jd_input) for c in st.session_state.to_process]
+            for i, f in enumerate(concurrent.futures.as_completed(futures)):
+                final_results.append(f.result())
+                bar.progress((i + 1) / len(futures))
+        st.session_state.results, st.session_state.workflow = final_results, "DONE"
+        st.rerun()
+
+    elif st.session_state.workflow == "DONE":
+        col_t, col_b = st.columns([8, 2])
+        with col_b:
+            if st.button("Toggle All Details", key="expand_eval"):
+                st.session_state.expand_all = not st.session_state.expand_all
+                st.rerun()
         
-        for index, file in enumerate(uploaded_files):
-            with st.spinner(f"Reading {file.name} (File {index+1} of {len(uploaded_files)})..."):
+        for idx, c in enumerate(st.session_state.results):
+            box = "selected-box" if c['status'] == "SELECTED" else "rejected-box"
+            st.markdown(f'<div class="{box}"><b>{c["name"]}</b> — {c["status"]}</div>', unsafe_allow_html=True)
+            with st.expander("AI Evaluation Details", expanded=st.session_state.expand_all):
+                st.write(f"**AI Reasoning:** {c.get('reason')}")
+                st.write(f"📞 {c['mobile']} | ✉️ {c['email']}")
+                st.write(f"✅ **Matches:** {', '.join(c.get('matched', []))}")
+                st.write(f"❌ **Gaps:** {', '.join(c.get('missing', []))}")
+                st.download_button("Download Resume", c['bytes'], c['name'], key=f"eval_dl_{idx}")
+
+        if st.button("New Batch"): st.session_state.workflow, st.session_state.results = "INPUT", []; st.rerun()
+
+# ================= HISTORY PAGE =================
+else:
+    st.subheader("📊 Evaluation History")
+
+    with st.form("history_filter"):
+        c1, c2, c3 = st.columns(3)
+        t_f = c1.selectbox("Timeframe", ["Last 7 Days", "Today", "All Time", "Custom Range"])
+        s_f = c2.selectbox("Filter Status", ["All", "SELECTED", "REJECTED"])
+        d_r = c3.date_input("Select Dates", [])
+        if st.form_submit_button("Fetch Records"):
+            data = metadata_table.scan().get('Items', [])
+            now, filtered = datetime.utcnow(), []
+            for i in data:
                 try:
-                    resume_text = ""
-                    if file.type == "application/pdf":
-                        with pdfplumber.open(file) as pdf:
-                            max_pages = min(len(pdf.pages), 3)
-                            for i in range(max_pages):
-                                text = pdf.pages[i].extract_text()
-                                if text: 
-                                    resume_text += text + " \n"
-                    else:
-                        resume_text = file.read().decode("utf-8", errors="ignore")
+                    dt = datetime.strptime(i.get("Date", "").split(" ")[0], "%Y-%m-%d")
+                    if s_f != "All" and i.get("Status") != s_f: continue
+                    if t_f == "Today" and dt.date() != now.date(): continue
+                    if t_f == "Last 7 Days" and dt < now - timedelta(days=7): continue
+                    if t_f == "Custom Range" and len(d_r) == 2:
+                        if not (d_r[0] <= dt.date() <= d_r[1]): continue
+                    filtered.append(i)
+                except: continue
+            st.session_state.history_data = sorted(filtered, key=lambda x: x.get('Date', ''), reverse=True)
 
-                    resume_text = resume_text.encode("ascii", "ignore").decode("ascii")
+    if st.session_state.history_data:
+        col_info, col_toggle = st.columns([8, 2])
+        col_info.caption(f"Found {len(st.session_state.history_data)} records")
+        with col_toggle:
+            if st.button("Toggle All History", key="expand_hist"):
+                st.session_state.expand_all = not st.session_state.expand_all
+                st.rerun()
 
-                    # ==========================================
-                    # PYTHON DATA EXTRACTION
-                    # ==========================================
-                    email_match = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', resume_text)
-                    ext_email = email_match.group(0) if email_match else "Not Found"
-
-                    phone_match = re.search(r'(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4,5}', resume_text)
-                    ext_mobile = phone_match.group(0) if phone_match else "Not Found"
-                    
-                    if ext_mobile != "Not Found":
-                        ext_mobile = re.sub(r'\D', '', ext_mobile)
-                        if len(ext_mobile) > 10 and ext_mobile.startswith("91"):
-                            ext_mobile = ext_mobile[2:]
-                    if not ext_mobile:
-                        ext_mobile = "Not Found"
-
-                    ext_name = "Not Found"
-                    lines = [line.strip() for line in resume_text.split('\n') if len(line.strip()) > 2]
-                    for line in lines:
-                        if line.lower() not in ["resume", "curriculum vitae", "cv", "profile"]:
-                            ext_name = line
-                            break
-
-                    payload = {
-                        "job_role": role,
-                        "job_description": edited_jd, 
-                        "resumes": [{
-                            "filename": file.name,
-                            "content": resume_text[:4000],
-                            "candidate_name": ext_name,
-                            "email": ext_email,
-                            "mobile": ext_mobile
-                        }]
-                    }
-                    
-                    resp = requests.post(api_url, json=payload, timeout=60) 
-                    
-                    raw_data = resp.json()
-                    result_json = raw_data.get("body", raw_data)
-                    if isinstance(result_json, str):
-                        result_json = json.loads(result_json)
-
-                    if resp.status_code == 200:
-                        results_list = result_json.get("results", [])
-                        for res in results_list:
-                            status = res.get("status", "ERROR")
-                            filename = res.get("filename", "Unknown")
-                            evaluation_data = res.get("evaluation", {})
-                            
-                            # ==========================================
-                            # JSON SKILL EXTRACTION
-                            # ==========================================
-                            raw_matched = evaluation_data.get("key_matches", evaluation_data.get("matches", evaluation_data.get("matched_skills", [])))
-                            raw_missing = evaluation_data.get("key_gaps", evaluation_data.get("gaps", evaluation_data.get("missing_skills", [])))
-                            
-                            matched_skills = ", ".join(raw_matched) if isinstance(raw_matched, list) else str(raw_matched)
-                            missing_skills = ", ".join(raw_missing) if isinstance(raw_missing, list) else str(raw_missing)
-                            
-                            if not matched_skills or matched_skills.strip() in ["", "[]", "None"]: 
-                                matched_skills = "None identified"
-                            if not missing_skills or missing_skills.strip() in ["", "[]", "None"]: 
-                                missing_skills = "None identified"
-
-                            bg_color = "#28a745" if status == "SELECTED" else "#dc3545"
-                            
-                            st.markdown(f"""
-                            <div style="background-color: {bg_color}; padding: 12px; border-radius: 8px 8px 0 0; color: white; margin-top: 20px;">
-                                <h4 style="margin: 0; color: white;">{filename} - {status}</h4>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            
-                            # --- NATIVE MARKDOWN TABLE ---
-                            with st.expander("View Full Candidate Breakdown", expanded=False):
-                                table_markdown = f"""
-| Candidate Name | Mobile | Email | Matched Skills ✅ | Missing Skills ❌ |
-| :--- | :--- | :--- | :--- | :--- |
-| **{ext_name}** | {ext_mobile} | {ext_email} | {matched_skills} | {missing_skills} |
-                                """
-                                st.markdown(table_markdown)
-
-                    else:
-                        st.error(f"API Error for {file.name}: {resp.status_code}")
-                        st.write(result_json)
-
-                except Exception as e:
-                    st.error(f"Application Error on {file.name}: {e}")
-            
-            progress_bar.progress((index + 1) / len(uploaded_files))
-        
-        st.success("Batch Processing Complete!")
+        for idx, i in enumerate(st.session_state.history_data):
+            label = "✅" if i.get("Status") == "SELECTED" else "❌"
+            with st.expander(f"{label} {i.get('Date')} - {i.get('Email ID')}", expanded=st.session_state.expand_all):
+                st.write(f"**Mobile:** {i.get('Mobile Number')}")
+                st.write(f"**Matched:** {i.get('Skills Matched')}")
+                st.write(f"**Gaps:** {i.get('Skills Unmatched')}")
+                if i.get('Filename'):
+                    folder = "selected" if i.get("Status") == "SELECTED" else "rejected"
+                    try:
+                        url = s3_client.generate_presigned_url('get_object',
+                            Params={'Bucket': S3_BUCKET, 'Key': f"{folder}/{i.get('Filename')}", 'ResponseContentDisposition': f"attachment; filename={i.get('Filename')}"},
+                            ExpiresIn=3600)
+                        st.markdown(f'<a href="{url}" target="_blank" style="text-decoration:none; background:#2563eb; color:white; padding:8px 15px; border-radius:5px; font-size:14px; font-weight:600;">💾 Download Resume</a>', unsafe_allow_html=True)
+                    except: st.warning("Download link unavailable.")
