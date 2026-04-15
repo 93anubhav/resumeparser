@@ -85,7 +85,6 @@ def get_aws():
         aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"]
     )
     db = session.resource('dynamodb')
-    # Use ap-south-1 for S3 as specified, forcing v4 signature for compatibility
     s3 = session.client('s3', region_name="ap-south-1", config=Config(signature_version='s3v4'))
     return db.Table("JobRoleDescriptionMapping"), db.Table("Resume_Metadata"), s3
 
@@ -101,18 +100,16 @@ if 'history_data' not in st.session_state: st.session_state.history_data = []
 
 # ================= LOGIC FUNCTIONS =================
 def clean_text(text):
-    """Normalizes whitespace and removes noise for the AI."""
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 def extract_pii(file_bytes, file_name, file_type):
-    """Enhanced extraction for PDFs and DOCX."""
     text = ""
     try:
         if file_name.lower().endswith(".pdf"):
             with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                 for page in pdf.pages[:3]:
-                    extracted = page.extract_text(layout=True) # layout=True is critical for multi-column resumes
+                    extracted = page.extract_text(layout=True)
                     if extracted: text += extracted + "\n"
         elif file_name.lower().endswith(".docx"):
             doc = docx.Document(io.BytesIO(file_bytes))
@@ -121,15 +118,25 @@ def extract_pii(file_bytes, file_name, file_type):
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         email = re.search(email_pattern, text)
         
-        # Robust phone pattern for international/domestic formats
+        # --- Updated Mobile Extraction Logic ---
         phone_pattern = r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4,5}'
-        phone = re.search(phone_pattern, text)
+        phone_match = re.search(phone_pattern, text)
+        
+        mobile_final = "N/A"
+        if phone_match:
+            # Step 1: Remove all non-digit characters (+, -, spaces, parentheses)
+            digits_only = re.sub(r'\D', '', phone_match.group(0))
+            # Step 2: Keep only the last 10 digits to strip STD/Country codes
+            if len(digits_only) >= 10:
+                mobile_final = digits_only[-10:]
+            else:
+                mobile_final = digits_only
 
         return {
             "name": file_name,
             "text": clean_text(text)[:4500],
             "email": email.group(0) if email else "N/A",
-            "mobile": phone.group(0) if phone else "N/A",
+            "mobile": mobile_final,
             "bytes": file_bytes,
             "type": file_type
         }
@@ -137,7 +144,6 @@ def extract_pii(file_bytes, file_name, file_type):
         return {"name": file_name, "text": "", "email": "N/A", "mobile": "N/A", "error": str(e)}
 
 def call_ai(cand_data, role, jd):
-    """Worker for parallel API calls."""
     payload = {
         "job_role": role,
         "job_description": jd,
@@ -160,10 +166,9 @@ def call_ai(cand_data, role, jd):
 # ================= SIDEBAR =================
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/5/51/IBM_logo.svg", width=120)
-    st.markdown("### Evaluation Workspace")
+    st.markdown("### Evaluation Parameters") # Renamed
     mode = st.radio("Navigation", ["Evaluate Resumes", "History Audit"])
 
-    # Load Roles
     scan = jd_table.scan(ProjectionExpression="JobRole")
     roles = ["Select Role"] + sorted([i['JobRole'] for i in scan.get('Items', [])])
     role = st.selectbox("Position", roles)
@@ -173,7 +178,7 @@ with st.sidebar:
         item = jd_table.get_item(Key={"JobRole": role}).get("Item", {})
         fetched_jd = item.get("JobDescription", "")
 
-    jd_input = st.text_area("Job Description", value=fetched_jd, height=200)
+    jd_input = st.text_area("Hiring Criteria", value=fetched_jd, height=200)
 
 # ================= HEADER =================
 st.markdown(f"""
@@ -193,12 +198,10 @@ if mode == "Evaluate Resumes":
             if role == "Select Role" or not files:
                 st.warning("Please select a role and upload files.")
             else:
-                with st.spinner("Extracting text & checking history..."):
-                    # Fast Parallel Extraction
+                with st.spinner("Processing documents..."):
                     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
                         candidates = list(ex.map(lambda f: extract_pii(f.getvalue(), f.name, f.type), files))
                     
-                    # 6-Month Duplicate Check
                     six_months_ago = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
                     history = metadata_table.scan(FilterExpression=Attr('Date').gte(six_months_ago)).get('Items', [])
                     
@@ -216,9 +219,9 @@ if mode == "Evaluate Resumes":
                 st.rerun()
 
     elif st.session_state.workflow == "DUPLICATE_CHECK":
-        st.markdown(f"""<div class="duplicate-warning"><h3>⚠️ {len(st.session_state.duplicates)} Duplicates Detected</h3>
-        Candidates found in the 6-month history.</div>""", unsafe_allow_html=True)
-        st.table([{"Name": d['name'], "Email": d['email'], "Last Applied": d['prev_date'], "Status": d['prev_status']} for d in st.session_state.duplicates])
+        st.markdown(f"""<div class="duplicate-warning"><h3>⚠️ {len(st.session_state.duplicates)} Records Found</h3>
+        These candidates applied within the last 180 days.</div>""", unsafe_allow_html=True)
+        st.table([{"Name": d['name'], "Mobile": d['mobile'], "Email": d['email'], "Last Applied": d['prev_date'], "Status": d['prev_status']} for d in st.session_state.duplicates])
         
         c1, c2, c3 = st.columns(3)
         if c1.button("Skip Duplicates"): st.session_state.workflow = "PROCESSING"; st.rerun()
@@ -226,10 +229,10 @@ if mode == "Evaluate Resumes":
         if c3.button("Cancel"): st.session_state.workflow = "INPUT"; st.rerun()
 
     elif st.session_state.workflow == "PROCESSING":
-        st.info(f"Processing {len(st.session_state.to_process)} resumes in parallel...")
+        st.info(f"Analyzing {len(st.session_state.to_process)} resumes...")
         bar = st.progress(0)
         final_results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as ex:
             futures = [ex.submit(call_ai, c, role, jd_input) for c in st.session_state.to_process]
             for i, f in enumerate(concurrent.futures.as_completed(futures)):
                 final_results.append(f.result())
@@ -240,32 +243,32 @@ if mode == "Evaluate Resumes":
     elif st.session_state.workflow == "DONE":
         col_t, col_b = st.columns([8, 2])
         with col_b:
-            if st.button("Toggle All Details", key="expand_eval"):
+            if st.button("Expand/Collapse All", key="expand_eval"):
                 st.session_state.expand_all = not st.session_state.expand_all
                 st.rerun()
         
         for idx, c in enumerate(st.session_state.results):
             box = "selected-box" if c['status'] == "SELECTED" else "rejected-box"
             st.markdown(f'<div class="{box}"><b>{c["name"]}</b> — {c["status"]}</div>', unsafe_allow_html=True)
-            with st.expander("AI Evaluation Details", expanded=st.session_state.expand_all):
-                st.write(f"**AI Reasoning:** {c.get('reason')}")
+            with st.expander("Candidate Insights", expanded=st.session_state.expand_all):
+                st.write(f"**AI Decision Reasoning:** {c.get('reason')}")
                 st.write(f"📞 {c['mobile']} | ✉️ {c['email']}")
                 st.write(f"✅ **Matches:** {', '.join(c.get('matched', []))}")
                 st.write(f"❌ **Gaps:** {', '.join(c.get('missing', []))}")
-                st.download_button("Download Resume", c['bytes'], c['name'], key=f"eval_dl_{idx}")
+                st.download_button("Download Document", c['bytes'], c['name'], key=f"eval_dl_{idx}")
 
         if st.button("New Batch"): st.session_state.workflow, st.session_state.results = "INPUT", []; st.rerun()
 
 # ================= HISTORY PAGE =================
 else:
-    st.subheader("📊 Evaluation History")
+    st.subheader("📊 Audit Trail & History")
 
     with st.form("history_filter"):
         c1, c2, c3 = st.columns(3)
-        t_f = c1.selectbox("Timeframe", ["Last 7 Days", "Today", "All Time", "Custom Range"])
-        s_f = c2.selectbox("Filter Status", ["All", "SELECTED", "REJECTED"])
-        d_r = c3.date_input("Select Dates", [])
-        if st.form_submit_button("Fetch Records"):
+        t_f = c1.selectbox("Time Window", ["Last 7 Days", "Today", "All Time", "Custom Range"])
+        s_f = c2.selectbox("Filter Result", ["All", "SELECTED", "REJECTED"])
+        d_r = c3.date_input("Select Date Range", [])
+        if st.form_submit_button("Fetch Audit Records"):
             data = metadata_table.scan().get('Items', [])
             now, filtered = datetime.utcnow(), []
             for i in data:
@@ -282,18 +285,18 @@ else:
 
     if st.session_state.history_data:
         col_info, col_toggle = st.columns([8, 2])
-        col_info.caption(f"Found {len(st.session_state.history_data)} records")
+        col_info.caption(f"Records found: {len(st.session_state.history_data)}")
         with col_toggle:
-            if st.button("Toggle All History", key="expand_hist"):
+            if st.button("Expand/Collapse History", key="expand_hist"):
                 st.session_state.expand_all = not st.session_state.expand_all
                 st.rerun()
 
         for idx, i in enumerate(st.session_state.history_data):
             label = "✅" if i.get("Status") == "SELECTED" else "❌"
             with st.expander(f"{label} {i.get('Date')} - {i.get('Email ID')}", expanded=st.session_state.expand_all):
-                st.write(f"**Mobile:** {i.get('Mobile Number')}")
-                st.write(f"**Matched:** {i.get('Skills Matched')}")
-                st.write(f"**Gaps:** {i.get('Skills Unmatched')}")
+                st.write(f"**Mobile Number:** {i.get('Mobile Number')}")
+                st.write(f"**Skills Matched:** {i.get('Skills Matched')}")
+                st.write(f"**Missing Gaps:** {i.get('Skills Unmatched')}")
                 if i.get('Filename'):
                     folder = "selected" if i.get("Status") == "SELECTED" else "rejected"
                     try:
@@ -301,4 +304,4 @@ else:
                             Params={'Bucket': S3_BUCKET, 'Key': f"{folder}/{i.get('Filename')}", 'ResponseContentDisposition': f"attachment; filename={i.get('Filename')}"},
                             ExpiresIn=3600)
                         st.markdown(f'<a href="{url}" target="_blank" style="text-decoration:none; background:#2563eb; color:white; padding:8px 15px; border-radius:5px; font-size:14px; font-weight:600;">💾 Download Resume</a>', unsafe_allow_html=True)
-                    except: st.warning("Download link unavailable.")
+                    except: st.warning("Cloud link unavailable.")
