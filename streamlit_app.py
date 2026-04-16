@@ -238,7 +238,7 @@ st.markdown(f'<div class="header"><h2 style="margin:0;">⚡ AI Resume Matcher</h
 if mode == "Evaluate Resumes":
     if st.session_state.workflow == "INPUT":
         files = st.file_uploader("Upload Batch (Max 50)", accept_multiple_files=True, type=["pdf", "docx"])
-        if st.button("Initialize Analysis"):
+        if st.button("Start Evaluation"):
             if s_tech == "Select Technology" or not files:
                 st.warning("Ensure position details are selected and resumes are uploaded.")
             else:
