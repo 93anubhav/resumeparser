@@ -298,7 +298,7 @@ if mode == "Evaluate Resumes":
                 st.write(f"📞 {c['mobile']} | ✉️ {c['email']}")
                 st.write(f"✅ **Matched:** {', '.join(c.get('matched', []))}")
                 st.write(f"❌ **Gaps:** {', '.join(c.get('missing', []))}")
-                st.download_button("Download Document", c['bytes'], c['name'], key=f"dl_{idx}")
+                st.download_button("Download Resume", c['bytes'], c['name'], key=f"dl_{idx}")
 
         if st.button("New Batch"): st.session_state.workflow, st.session_state.results = "INPUT", []; st.rerun()
 
@@ -342,5 +342,5 @@ else:
                     fold = "selected" if i.get("Status") == "SELECTED" else "rejected"
                     try:
                         url = s3_client.generate_presigned_url('get_object', Params={'Bucket': S3_BUCKET, 'Key': f"{fold}/{i.get('Filename')}", 'ResponseContentDisposition': f"attachment; filename={i.get('Filename')}"}, ExpiresIn=3600)
-                        st.markdown(f'<a href="{url}" target="_blank" class="download-link">💾 Secure Download</a>', unsafe_allow_html=True)
+                        st.markdown(f'<a href="{url}" target="_blank" class="download-link">💾 Download Resume</a>', unsafe_allow_html=True)
                     except: st.warning("S3 access error.")
