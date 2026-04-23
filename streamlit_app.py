@@ -143,7 +143,7 @@ if mode == "Evaluate Resumes":
         files = st.file_uploader("Upload Resumes", accept_multiple_files=True, type=["pdf","docx"])
         if st.button("Start AI Analysis") and files and s_tech != "Select Technology":
             with st.spinner("Processing documents..."):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
                     cands = list(ex.map(lambda f: extract_resume_metadata(f.getvalue(), f.name, f.type), files))
                 limit = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
                 audit = metadata_table.scan(FilterExpression=Attr('Date').gte(limit)).get('Items', [])
@@ -167,7 +167,7 @@ if mode == "Evaluate Resumes":
         st.info(f"AI Engine screening {len(st.session_state.to_process)} resumes...")
         results = []
         label = f"{s_jrss} ({s_tech}) - {s_band}"
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
             futures = [ex.submit(fire_ai_evaluation, c, label, final_jd) for c in st.session_state.to_process]
             for f in concurrent.futures.as_completed(futures): results.append(f.result())
         st.session_state.results, st.session_state.workflow = results, "DONE"; st.rerun()
