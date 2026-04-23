@@ -121,7 +121,7 @@ if mode == "Evaluate Resumes":
             st.error("Limit exceeded: Please upload a maximum of 35 resumes at a time.")
             st.session_state.limit_error = False
 
-        files = st.file_uploader("Upload Resumes", accept_multiple_files=True, type=["pdf","docx"], key=st.session_state.uploader_key)
+        files = st.file_uploader("Upload Resumes Max(35)", accept_multiple_files=True, type=["pdf","docx"], key=st.session_state.uploader_key)
         do_check = st.checkbox("Perform 6-month duplicate check", value=True)
         
         # Updated limit to 35
