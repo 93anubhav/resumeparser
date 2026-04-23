@@ -45,7 +45,7 @@ api_url = st.secrets.get("API_URL")
 S3_BUCKET = "resumeparser"
 jd_table, metadata_table, s3_client = get_aws_resources()
 
-# Session State Initialization
+# Session State
 for key, val in [('workflow','INPUT'),('results',[]),('to_process',[]),('duplicates',[]),('expand_all',False),('history_data',None),('uploader_key','0'),('limit_error',False)]:
     st.session_state.setdefault(key, val)
 
@@ -73,8 +73,7 @@ def extract_resume_metadata(file_bytes, file_name, file_type):
 
 def fire_ai_evaluation(resumes_list, label, jd):
     payload = {
-        "job_role": label, 
-        "job_description": jd, 
+        "job_role": label, "job_description": jd, 
         "resumes": [{"filename": r['name'], "candidate_name": r['candidate_name'], "content": r['text'], "email": r['email'], "mobile": r['mobile']} for r in resumes_list]
     }
     try:
@@ -84,15 +83,16 @@ def fire_ai_evaluation(resumes_list, label, jd):
         if isinstance(res.get("body"), str): res = json.loads(res["body"])
         elif "body" in res: res = res["body"]
         
+        results_map = {item['filename']: item for item in res.get("results", [])}
         processed_results = []
-        for orig, eval_item in zip(resumes_list, res.get("results", [])):
+        for orig in resumes_list:
+            eval_item = results_map.get(orig['name'], {})
             eval_b = eval_item.get("evaluation", {})
             processed_results.append({
-                **orig, 
-                "status": eval_item.get("status"), 
-                "reason": eval_b.get("reasoning"), 
-                "matched": eval_b.get("matched_skills"), 
-                "missing": eval_b.get("missing_skills")
+                **orig, "status": eval_item.get("status", "ERROR"), 
+                "reason": eval_b.get("reasoning", "No evaluation data"), 
+                "matched": eval_b.get("matched_skills", "N/A"), 
+                "missing": eval_b.get("missing_skills", "N/A")
             })
         return processed_results
     except: return []
@@ -125,13 +125,11 @@ if mode == "Evaluate Resumes":
         do_check = st.checkbox("Perform 6-month duplicate check", value=True)
         
         if files and len(files) > 15:
-            st.session_state.uploader_key = str(uuid.uuid4())
-            st.session_state.limit_error = True
-            st.rerun()
+            st.session_state.uploader_key = str(uuid.uuid4()); st.session_state.limit_error = True; st.rerun()
 
         if st.button("Start AI Analysis") and files and s_tech != "Select Technology":
-            with st.spinner("Processing..."):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+            with st.spinner("Uploading Files and extracting metadata..."):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=15) as ex:
                     cands = list(ex.map(lambda f: extract_resume_metadata(f.getvalue(), f.name, f.type), files))
                 
                 if do_check:
@@ -144,9 +142,7 @@ if mode == "Evaluate Resumes":
                         else: st.session_state.to_process.append(c)
                     st.session_state.workflow = "DUPLICATE_CHECK" if st.session_state.duplicates else "PROCESSING"
                 else:
-                    st.session_state.to_process = cands
-                    st.session_state.duplicates = []
-                    st.session_state.workflow = "PROCESSING"
+                    st.session_state.to_process, st.session_state.duplicates = cands, []; st.session_state.workflow = "PROCESSING"
                 st.rerun()
 
     elif st.session_state.workflow == "DUPLICATE_CHECK":
@@ -174,7 +170,7 @@ if mode == "Evaluate Resumes":
         if st.button("New Batch"): st.session_state.workflow, st.session_state.results = "INPUT", []; st.rerun()
 
 else:
-    # History Page
+    # History Page Logic
     st.subheader("📊 Screening Audit Trail")
     c1, c2, c3 = st.columns(3)
     win = c1.selectbox("Time Window", ["Last 7 Days", "Today", "All Time", "Custom Range"])
