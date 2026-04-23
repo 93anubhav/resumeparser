@@ -13,7 +13,16 @@ from boto3.dynamodb.conditions import Attr
 
 # ================= CONFIG =================
 st.set_page_config(page_title="AI Resume Matcher", page_icon="⚡", layout="wide")
-
+# --- HIDE STREAMLIT BRANDING ---
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            header {visibility: hidden;}
+            footer {visibility: hidden;}
+            .stAppDeployButton {display: none;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
 # ================= UI / CSS =================
 st.markdown("""
 <style>
