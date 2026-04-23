@@ -89,7 +89,7 @@ def fire_ai_evaluation(resumes_list, label, jd):
             eval_item = results_map.get(orig['name'], {})
             eval_b = eval_item.get("evaluation", {})
             processed_results.append({
-                **orig, "status": eval_item.get("status", "ERROR"), 
+                **orig, "status": eval_item.get("status", "REJECTED"), 
                 "reason": eval_b.get("reasoning", "No evaluation data"), 
                 "matched": eval_b.get("matched_skills", "N/A"), 
                 "missing": eval_b.get("missing_skills", "N/A")
@@ -118,32 +118,38 @@ st.markdown(f'<div class="header"><h2>⚡ AI Resume Matcher</h2><span>{mode}</sp
 if mode == "Evaluate Resumes":
     if st.session_state.workflow == "INPUT":
         if st.session_state.limit_error:
-            st.error("Limit exceeded: Please upload a maximum of 15 resumes at a time.")
+            st.error("Limit exceeded: Please upload a maximum of 35 resumes at a time.")
             st.session_state.limit_error = False
 
         files = st.file_uploader("Upload Resumes", accept_multiple_files=True, type=["pdf","docx"], key=st.session_state.uploader_key)
         do_check = st.checkbox("Perform 6-month duplicate check", value=True)
         
-        if files and len(files) > 15:
+        # Updated limit to 35
+        if files and len(files) > 35:
             st.session_state.uploader_key = str(uuid.uuid4()); st.session_state.limit_error = True; st.rerun()
 
-        if st.button("Start AI Analysis") and files and s_tech != "Select Technology":
-            with st.spinner("Uploading Files and extracting metadata..."):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=15) as ex:
-                    cands = list(ex.map(lambda f: extract_resume_metadata(f.getvalue(), f.name, f.type), files))
-                
-                if do_check:
-                    limit_dt = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
-                    audit = metadata_table.scan(FilterExpression=Attr('Date').gte(limit_dt), ProjectionExpression="#em, #mob, #dt, #stat", ExpressionAttributeNames={"#em": "Email ID", "#mob": "Mobile Number", "#dt": "Date", "#stat": "Status"}).get('Items', [])
-                    st.session_state.to_process, st.session_state.duplicates = [], []
-                    for c in cands:
-                        dup = next((h for h in audit if (c['email'] != "N/A" and c['email'] == h.get('Email ID')) or (c['mobile'] != "N/A" and c['mobile'] == h.get('Mobile Number'))), None)
-                        if dup: c['p_date'], c['p_status'] = dup.get('Date'), dup.get('Status'); st.session_state.duplicates.append(c)
-                        else: st.session_state.to_process.append(c)
-                    st.session_state.workflow = "DUPLICATE_CHECK" if st.session_state.duplicates else "PROCESSING"
-                else:
-                    st.session_state.to_process, st.session_state.duplicates = cands, []; st.session_state.workflow = "PROCESSING"
-                st.rerun()
+        if st.button("Start AI Analysis"):
+            if not files: st.error("❌ Please upload resumes to proceed.")
+            elif s_jrss == "Select JRSS": st.error("❌ Please select a JRSS.")
+            elif s_band == "Select BAND": st.error("❌ Please select a Band.")
+            elif s_tech == "Select Technology": st.error("❌ Please select a Technology.")
+            else:
+                with st.spinner("Uploading Resumes and Extracting Metadata..."):
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as ex:
+                        cands = list(ex.map(lambda f: extract_resume_metadata(f.getvalue(), f.name, f.type), files))
+                    
+                    if do_check:
+                        limit_dt = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
+                        audit = metadata_table.scan(FilterExpression=Attr('Date').gte(limit_dt), ProjectionExpression="#em, #mob, #dt, #stat", ExpressionAttributeNames={"#em": "Email ID", "#mob": "Mobile Number", "#dt": "Date", "#stat": "Status"}).get('Items', [])
+                        st.session_state.to_process, st.session_state.duplicates = [], []
+                        for c in cands:
+                            dup = next((h for h in audit if (c['email'] != "N/A" and c['email'] == h.get('Email ID')) or (c['mobile'] != "N/A" and c['mobile'] == h.get('Mobile Number'))), None)
+                            if dup: c['p_date'], c['p_status'] = dup.get('Date'), dup.get('Status'); st.session_state.duplicates.append(c)
+                            else: st.session_state.to_process.append(c)
+                        st.session_state.workflow = "DUPLICATE_CHECK" if st.session_state.duplicates else "PROCESSING"
+                    else:
+                        st.session_state.to_process, st.session_state.duplicates = cands, []; st.session_state.workflow = "PROCESSING"
+                    st.rerun()
 
     elif st.session_state.workflow == "DUPLICATE_CHECK":
         st.markdown(f'<div class="duplicate-warning"><h3>⚠️ {len(st.session_state.duplicates)} Records Detected</h3>Previous applications found within the last 180 days.</div>', unsafe_allow_html=True)
@@ -162,7 +168,9 @@ if mode == "Evaluate Resumes":
     elif st.session_state.workflow == "DONE":
         if st.button("Expand/Collapse All"): st.session_state.expand_all = not st.session_state.get('expand_all', False); st.rerun()
         for idx, c in enumerate(st.session_state.results):
-            st.markdown(f'<div class="{"selected-box" if c["status"]=="SELECTED" else "rejected-box"}"><b>{c["candidate_name"]}</b> — {c["status"]}</div>', unsafe_allow_html=True)
+            db_stat = str(c.get("status", "")).strip().upper()
+            box = "selected-box" if db_stat == "SELECTED" else "rejected-box"
+            st.markdown(f'<div class="{box}"><b>{c["candidate_name"]}</b> — {c["status"]}</div>', unsafe_allow_html=True)
             with st.expander("Analysis Insights", expanded=st.session_state.get('expand_all', False)):
                 st.write(f"**Reasoning:** {c.get('reason')}"); st.write(f"📞 {c['email']} | ✉️ {c['mobile']}")
                 st.write(f"✅ **Matched:** {c.get('matched', 'N/A')}"); st.write(f"❌ **Missing:** {c.get('missing', 'N/A')}")
@@ -176,13 +184,15 @@ else:
     win = c1.selectbox("Time Window", ["Last 7 Days", "Today", "All Time", "Custom Range"])
     stat = c2.selectbox("Filter Status", ["All", "SELECTED", "REJECTED"])
     rng = c3.date_input("Date Range", []) if win == "Custom Range" else []
+    
     if st.button("Fetch Records", use_container_width=True):
         items = metadata_table.scan().get('Items', [])
         now, filtered = datetime.utcnow(), []
         for i in items:
             try:
                 dt = datetime.strptime(i.get("Date", "").split(" ")[0], "%Y-%m-%d")
-                if stat != "All" and i.get("Status") != stat: continue
+                db_stat = str(i.get("Status", "")).strip().upper()
+                if stat != "All" and db_stat != stat: continue
                 if win == "Today" and dt.date() != now.date(): continue
                 if win == "Last 7 Days" and dt < now - timedelta(days=7): continue
                 if win == "Custom Range" and len(rng) == 2 and not (rng[0] <= dt.date() <= rng[1]): continue
@@ -195,9 +205,10 @@ else:
         else:
             if st.button("Toggle Detail View"): st.session_state.expand_all = not st.session_state.get('expand_all', False); st.rerun()
             for idx, i in enumerate(st.session_state.history_data):
-                tag = "✅" if i.get("Status") == "SELECTED" else "❌"
+                db_stat = str(i.get("Status", "")).strip().upper()
+                tag = "✅" if db_stat == "SELECTED" else "❌"
                 with st.expander(f"{tag} {i.get('Date')} — {i.get('Candidate Name', 'Unknown')}", expanded=st.session_state.get('expand_all', False)):
                     st.write(f"**Email ID:** {i.get('Email ID')}"); st.write(f"**Mobile Number:** {i.get('Mobile Number')}")
                     st.write(f"✅ **Matched:** {i.get('Skills Matched', 'N/A')}"); st.write(f"❌ **Missing:** {i.get('Skills Unmatched', 'N/A')}")
-                    url = s3_client.generate_presigned_url('get_object', Params={'Bucket': S3_BUCKET, 'Key': f"{'selected' if i.get('Status')=='SELECTED' else 'rejected'}/{i.get('Filename')}"}, ExpiresIn=3600)
+                    url = s3_client.generate_presigned_url('get_object', Params={'Bucket': S3_BUCKET, 'Key': f"{'selected' if db_stat=='SELECTED' else 'rejected'}/{i.get('Filename')}"}, ExpiresIn=3600)
                     st.markdown(f'<a href="{url}" target="_blank" class="download-link">💾 Download Original File</a>', unsafe_allow_html=True)
