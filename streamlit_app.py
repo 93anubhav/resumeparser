@@ -15,16 +15,19 @@ from boto3.dynamodb.conditions import Attr
 # ================= CONFIG =================
 st.set_page_config(page_title="AI Resume Matcher", page_icon="⚡", layout="wide")
 
-# CLEAN UI CSS: Hides Header, Footer, Menu, Deploy Button, and Status/Profile widgets
+# CLEAN UI CSS: Targeted removal of Profile icon (Toolbar) and Paper Boat (Viewer Badge)
 st.markdown("""
 <style>
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    .stAppDeployButton {display: none;}
-    [data-testid="stStatusWidget"] {display: none;}
-    .viewerBadge_container__1QSob {display: none !important;}
-    .styles_viewerBadge__1yB_j {display: none !important;}
+    /* Hide the top right toolbar (Profile, Status, Menu) */
+    [data-testid="stToolbar"] {visibility: hidden; display: none !important;}
+    
+    /* Hide the "Made with Streamlit" badge and footer */
+    [data-testid="stViewerBadge"] {display: none !important;}
+    footer {display: none !important;}
+    
+    /* Hide Deploy button and Header */
+    header {visibility: hidden; height: 0px !important;}
+    .stAppDeployButton {display: none !important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,6 +137,7 @@ if mode == "Evaluate Resumes":
         files = st.file_uploader("Upload Resumes", accept_multiple_files=True, type=["pdf","docx"], key=st.session_state.uploader_key)
         do_check = st.checkbox("Perform 6-month duplicate check", value=True)
         
+        # Hard limit at 35
         if files and len(files) > 35:
             st.session_state.uploader_key = str(uuid.uuid4()); st.session_state.limit_error = True; st.rerun()
 
@@ -177,7 +181,8 @@ if mode == "Evaluate Resumes":
     elif st.session_state.workflow == "DONE":
         if st.button("Expand/Collapse All"): st.session_state.expand_all = not st.session_state.get('expand_all', False); st.rerun()
         for idx, c in enumerate(st.session_state.results):
-            box = "selected-box" if str(c.get("status", "")).strip().upper() == "SELECTED" else "rejected-box"
+            db_stat = str(c.get("status", "")).strip().upper()
+            box = "selected-box" if db_stat == "SELECTED" else "rejected-box"
             st.markdown(f'<div class="{box}"><b>{c["candidate_name"]}</b> — {c["status"]}</div>', unsafe_allow_html=True)
             with st.expander("Analysis Insights", expanded=st.session_state.get('expand_all', False)):
                 st.write(f"**Reasoning:** {c.get('reason')}"); st.write(f"📞 {c['email']} | ✉️ {c['mobile']}")
@@ -186,7 +191,7 @@ if mode == "Evaluate Resumes":
         if st.button("New Batch"): st.session_state.workflow, st.session_state.results = "INPUT", []; st.rerun()
 
 else:
-    # History Page Logic
+    # History Page
     st.subheader("📊 Screening Audit Trail")
     c1, c2, c3 = st.columns(3)
     win = c1.selectbox("Time Window", ["Last 7 Days", "Today", "All Time", "Custom Range"])
